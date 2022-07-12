@@ -9,14 +9,18 @@ $ ln -s target/release/mmk somewhere/in/your/PATH
 ```
 
 # Usage
-First, set two layouts you want to use using `setxkbmap`:
+First, set two or more layouts you want to use using `setxkbmap`, for example:
 ```console
-$ setxkbmap -layout dvorak,us
+$ setxkbmap -layout dvorak,us,de -variant ,,koy
 ```
 
-Your main system layout is now Dvorak and your backup layout is the US layout. After this is done, run `mmk` on a window of your choice:
-```console
-$ mmk -w 123456
+Your main system layout is now Dvorak and your backup layouts are US and German with the `k.o,y` variant. After this is done, run `mmk` on a window of your choice, for example Discord:
+```bash
+$ mmk --class discord.discord --layout 1 --all
+# --layout specifies which layout to use, 0 meaning the first, 1 second and so on... 
+# --all tells mimic to run on all windows which fit the specified criteria
 ```
 
-If everything works correctly, the specified window should use the specified second layout, US in our case.
+The window should now register the specified layout.
+
+# How it works

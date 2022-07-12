@@ -1,5 +1,4 @@
-#![allow(unused)]
-use std::{env::args, ffi::CString, process::exit};
+use std::{collections::HashMap, env::args, process::exit};
 
 use x11rb::{
     connect,
@@ -15,11 +14,9 @@ use x11rb::{
     CURRENT_TIME,
 };
 
-use std::ffi::CStr;
-
 use x11::xlib::{
-    XCloseDisplay, XKeysymToKeycode, XKeysymToString, XStringToKeysym, XkbKeycodeToKeysym,
-    XkbKeysymToModifiers, XkbOpenDisplay, _XDisplay,
+    XCloseDisplay, XKeysymToKeycode, XkbKeycodeToKeysym, XkbKeysymToModifiers, XkbOpenDisplay,
+    _XDisplay,
 };
 
 fn usage() -> &'static str {
@@ -28,8 +25,8 @@ fn usage() -> &'static str {
 
   options:
     -h | --help                    \tprints this help message
-    -l | --layout                  \tspecify which layout to use(setxkbmap -layout us,sk,cz -> mmk -l 2; use cz layout)
-        default: 0
+    -l | --layout                  \tspecify which layout to use, starts from 0
+        default: 0, meaning use the current layout
     -w | --window <wid>            \ttry to run on a window with the given x11 id
         default: [needs to be specified]
     -c | --class <class>.<instance>\ttry to run on a window with the given x11 window class and instance
@@ -37,13 +34,13 @@ fn usage() -> &'static str {
     -p | --pid <pid>               \ttry to run on a client with the given process id
         default: [needs to be specified]
     -n | --name <name>             \ttry to run on a window with a given WM_NAME or _NET_WM_NAME property
-    -a | --all                     \ttry to run on a window with a given WM_NAME or _NET_WM_NAME property
+    -a | --all                     \ttry to run on all windows matching the specified criteria
   how to use:
     1. set up two layouts you want to use using setxkbmap:
         $ setxkbmap -layout dvorak,us
-    2. run with the specified window
-        $ mmk -w 123456
-    3. if the window id is correct, the correct events will be received
+    2. run with something specified
+        $ mmk --layout 1 --name MyWindow
+    3. the window should now receive the mimiced layout keys
 "
 }
 
@@ -163,15 +160,17 @@ enum KeyEvent {
     Release(KeyReleaseEvent),
 }
 
-fn translate(dpy: *mut _XDisplay, ev: KeyEvent, layout_index: usize) -> Result<(u8, u32), Box<dyn std::error::Error>> {
+fn translate(
+    dpy: *mut _XDisplay,
+    ev: KeyEvent,
+    layout_index: usize,
+) -> Result<(u8, u32), Box<dyn std::error::Error>> {
     let event = match ev {
         KeyEvent::Press(e) => e,
         KeyEvent::Release(e) => e,
     };
-    let layout_keysym = unsafe { XkbKeycodeToKeysym(dpy, event.detail, layout_index as _, event.state as _) };
-    unsafe {
-        let ptr = XKeysymToString(layout_keysym);
-    };
+    let layout_keysym =
+        unsafe { XkbKeycodeToKeysym(dpy, event.detail, layout_index as _, event.state as _) };
 
     let ret = unsafe {
         (
@@ -230,11 +229,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // atoms
     let net_wm_pid = conn.intern_atom(false, b"_NET_WM_PID")?.reply()?.atom;
     let net_wm_name = conn.intern_atom(false, b"_NET_WM_NAME")?.reply()?.atom;
-    let utf_8_string = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
-    let net_wm_clients = conn
-        .intern_atom(false, b"_NET_WM_CLIENT_LIST")?
-        .reply()?
-        .atom;
 
     config.help.then(|| {
         print!("{}", usage());
@@ -262,11 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     2048,
                 )?
                 .reply()?;
-            if class_reply.format != 8 {
-                println!(
-                    "type_ = {}, format = {}",
-                    class_reply.type_, class_reply.format
-                );
+            if class_reply.format != 8 || class_reply.type_ != AtomEnum::STRING.into() {
                 continue;
             }
 
@@ -315,7 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut mask = 0u32;
+    let mut masks: HashMap<u32, u32> = HashMap::new();
 
     if !windows.is_empty() {
         let mut wins = vec![windows[0]];
@@ -330,12 +320,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (m | EventMask::KEY_PRESS | EventMask::KEY_RELEASE).into(),
                 )),
             )?;
-            conn.grab_key(true, window, 32768u16, 0, GrabMode::ASYNC, GrabMode::ASYNC)?;
+            conn.grab_key(false, window, 32768u16, 0, GrabMode::ASYNC, GrabMode::ASYNC)?;
+
             conn.flush()?;
-            mask = conn.get_window_attributes(window)?.reply()?.your_event_mask;
+            masks.insert(
+                window,
+                conn.get_window_attributes(window)?.reply()?.your_event_mask,
+            );
         }
     } else {
-        return Ok(());
+        eprintln!("error: No window for the given specifications found.");
+        exit(1);
     }
 
     loop {
@@ -345,19 +340,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match event {
                 Event::KeyPress(mut e) => {
                     if !event.sent_event() {
-                        let (detail, state) = translate(dpy.ptr(), KeyEvent::Press(e), config.layout)?;
+                        let (detail, state) =
+                            translate(dpy.ptr(), KeyEvent::Press(e), config.layout)?;
                         e.detail = detail;
                         e.state = state as _;
-                        conn.send_event(false, e.event, mask, e)?;
+                        e.time = CURRENT_TIME;
+                        conn.send_event(true, e.event, masks[&e.event], e)?;
                         conn.flush()?;
                     }
                 }
                 Event::KeyRelease(mut e) => {
                     if !event.sent_event() {
-                        let (detail, state) = translate(dpy.ptr(), KeyEvent::Release(e), config.layout)?;
+                        let (detail, state) =
+                            translate(dpy.ptr(), KeyEvent::Release(e), config.layout)?;
                         e.detail = detail;
                         e.state = state as _;
-                        conn.send_event(false, e.event, mask, e)?;
+                        e.time = CURRENT_TIME;
+                        conn.send_event(true, e.event, masks[&e.event], e)?;
                         conn.flush()?;
                     }
                 }
@@ -366,6 +365,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             event_opt = conn.poll_for_event()?;
         }
     }
-
-    Ok(())
 }
